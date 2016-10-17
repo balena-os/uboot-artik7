@@ -24,6 +24,10 @@
 #include <usb/dwc2_udc.h>
 #endif
 
+#ifdef CONFIG_SENSORID_ARTIK
+#include <sensorid.h>
+#include <sensorid_artik.h>
+#endif
 DECLARE_GLOBAL_DATA_PTR;
 
 #ifdef CONFIG_REVISION_TAG
@@ -55,6 +59,67 @@ static void set_board_rev(u32 revision)
 
 	snprintf(info, ARRAY_SIZE(info), "%d", revision);
 	setenv("board_rev", info);
+}
+#endif
+
+#ifdef CONFIG_DISPLAY_BOARDINFO
+int checkboard(void)
+{
+	printf("\nBoard: ARTIK710 Raptor\n");
+
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_SENSORID_ARTIK
+static void get_sensorid(u32 revision)
+{
+	static struct udevice *dev;
+	uint16_t buf[5] = {0, };
+	char panel_env[64], *panel_str;
+	bool found_panel = false;
+	int i, ret;
+
+	if (revision < 3)
+		return;
+
+	ret = uclass_get_device_by_name(UCLASS_SENSOR_ID, "sensor_id@36", &dev);
+	if (ret < 0) {
+		printf("Cannot find sensor_id device\n");
+		return;
+	}
+
+	ret = sensorid_get_type(dev, &buf[0], 4);
+	if (ret < 0) {
+		printf("Cannot read sensor type - %d\n", ret);
+		return;
+	}
+
+	ret = sensorid_get_addon(dev, &buf[4]);
+	if (ret < 0) {
+		printf("Cannot read add-on board type - %d\n", ret);
+		return;
+	}
+
+	printf("LCD#1:0x%X, LCD#2:0x%X, CAM#1:0x%X, CAM#2:0x%X\n",
+			buf[0], buf[1], buf[2], buf[3]);
+	printf("ADD-ON-BOARD : 0x%X\n", buf[4]);
+
+	for (i = 0; i < SENSORID_LCD_MAX; i++) {
+		if (buf[i] != SENSORID_LCD_NONE) {
+			snprintf(panel_env, sizeof(panel_env), "lcd%d_%d",
+				 i + 1, buf[i]);
+			panel_str = getenv(panel_env);
+			if (panel_str) {
+				setenv("lcd_panel", panel_str);
+				found_panel = true;
+			}
+			break;
+		}
+	}
+
+	if (!found_panel)
+		setenv("lcd_panel", "NONE");
 }
 #endif
 
@@ -104,17 +169,13 @@ static void nx_phy_init(void)
 	nx_gpio_set_drive_strength(4, 20, 3);
 	nx_gpio_set_drive_strength(4, 21, 3);
 	nx_gpio_set_drive_strength(4, 24, 3);	/* TX clk */
-}
 
-#ifdef CONFIG_USB_EHCI_EXYNOS
-void board_ehci_power_en(void)
-{
-	/* ehci host power */
-	nx_gpio_set_pad_function(0, 16, 0);     /* GPIO */
-	nx_gpio_set_output_value(0, 16, 1);
-	nx_gpio_set_output_enable(0, 16, 1);
-}
+#ifdef CONFIG_SENSORID_ARTIK
+	/* I2C-GPIO for AVR */
+	nx_gpio_set_pad_function(1, 11, 2);     /* GPIO */
+	nx_gpio_set_pad_function(1, 18, 2);     /* GPIO */
 #endif
+}
 
 /* call from u-boot */
 int board_early_init_f(void)
@@ -172,9 +233,6 @@ int board_init(void)
 #endif
 
 	nx_phy_init();
-#ifdef CONFIG_USB_EHCI_EXYNOS
-	board_ehci_power_en();
-#endif
 
 #ifdef CONFIG_VIDEO_NX_LVDS
 	board_display_reset();
@@ -221,6 +279,13 @@ void pmic_init(void)
 #ifdef CONFIG_REVISION_TAG
 	}
 #endif
+
+	bit_mask = pmic_reg_read(dev, NXE2000_REG_PWRONTIMSET);
+	bit_mask &= ~(0x1 << NXE2000_POS_PWRONTIMSET_OFF_JUDGE_PWRON);
+	bit_mask |= (0x0 << NXE2000_POS_PWRONTIMSET_OFF_JUDGE_PWRON);
+	ret = pmic_write(dev, NXE2000_REG_PWRONTIMSET, &bit_mask, 1);
+	if (ret)
+		printf("Can't write PMIC REG: %d!\n", NXE2000_REG_PWRONTIMSET);
 
 	bit_mask = 0x00;
 	ret = pmic_reg_write(dev, (u32)NXE2000_REG_BANKSEL, (u32)bit_mask);
@@ -285,21 +350,36 @@ int board_late_init(void)
 #ifdef CONFIG_CMD_FACTORY_INFO
 	run_command("run factory_load", 0);
 #endif
+#ifdef CONFIG_SENSORID_ARTIK
+	get_sensorid(board_rev);
+#endif
 	return 0;
 }
 
 #ifdef CONFIG_USB_GADGET
 struct dwc2_plat_otg_data s5p6818_otg_data = {
-	.phy_control	= NULL,
 	.regs_phy	= PHY_BASEADDR_TIEOFF,
 	.regs_otg	= PHY_BASEADDR_HSOTG,
-	.usb_phy_ctrl	= NULL,
-	.usb_flags	= NULL,
 };
 
 int board_usb_init(int index, enum usb_init_type init)
 {
 	debug("USB_udc_probe\n");
 	return dwc2_udc_probe(&s5p6818_otg_data);
+}
+
+int g_dnl_bind_fixup(struct usb_device_descriptor *dev, const char *name)
+{
+	if (!strcmp(name, "usb_dnl_thor")) {
+		put_unaligned(CONFIG_G_DNL_THOR_VENDOR_NUM, &dev->idVendor);
+		put_unaligned(CONFIG_G_DNL_THOR_PRODUCT_NUM, &dev->idProduct);
+	} else if (!strcmp(name, "usb_dnl_ums")) {
+		put_unaligned(CONFIG_G_DNL_UMS_VENDOR_NUM, &dev->idVendor);
+		put_unaligned(CONFIG_G_DNL_UMS_PRODUCT_NUM, &dev->idProduct);
+	} else {
+		put_unaligned(CONFIG_G_DNL_VENDOR_NUM, &dev->idVendor);
+		put_unaligned(CONFIG_G_DNL_PRODUCT_NUM, &dev->idProduct);
+	}
+	return 0;
 }
 #endif

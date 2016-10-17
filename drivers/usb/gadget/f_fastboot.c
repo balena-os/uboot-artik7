@@ -192,7 +192,7 @@ static int mmc_make_parts(int dev, uint64_t (*parts)[2], int count)
 	}
 
 	if (p >= sizeof(cmd)) {
-		printf("** %s: cmd stack overflow : stack %lu, cmd %d **\n",
+		printf("** %s: cmd stack overflow : stack %zu, cmd %d **\n",
 		       __func__, sizeof(cmd), p);
 		while (1)
 			;
@@ -319,8 +319,7 @@ static int mmc_part_write(struct fastboot_part *fpart, void *buf,
 
 	if (fpart->fs_type & FASTBOOT_FS_EXT4) {
 		p = sprintf(cmd, "ext4_img_write %d %p %d %x",
-			    dev, (unsigned int)buf, fpart->part_num,
-			    (unsigned int)length);
+			    dev, buf, fpart->part_num, (unsigned int)length);
 		ret = run_command(cmd, 0);
 		if (ret < 0)
 			printf("Flash : %s\n", (ret < 0) ? "FAIL" : "DONE");
@@ -393,9 +392,9 @@ static struct fastboot_device f_devices[] = {
  * FASTBOOT COMMAND PARSE
  *
  */
-static inline void parse_comment(const char *str, const char **ret)
+static inline void parse_comment(const char *str, const char **ret, int len)
 {
-	const char *p = str, *r;
+	char *p = (char *)str, *r;
 
 	do {
 		r = strchr(p, '#');
@@ -409,7 +408,10 @@ static inline void parse_comment(const char *str, const char **ret)
 			break;
 		}
 		p++;
-	} while (1);
+		len -= (int)(p - str);
+		if (len <= 0)
+			p = (char *)str;
+	} while (len > 1);
 
 	/* for next */
 	*ret = p;
@@ -739,7 +741,7 @@ static int part_lists_make(const char *ptable_str, int ptable_str_len)
 	debug("\n---part_lists_make ---\n");
 	part_lists_init(0);
 
-	parse_comment(p, &p);
+	parse_comment(p, &p, len);
 	len -= (int)(p - ptable_str);
 	sort_string((char *)p, len);
 
@@ -980,7 +982,7 @@ static int parse_env_head(const char *env, const char **ret, char *str, int len)
 {
 	const char *p = env, *r = p;
 
-	parse_comment(p, &p);
+	parse_comment(p, &p, len);
 	r = strchr(p, '=');
 	if (!r)
 		return -1;
@@ -1031,7 +1033,7 @@ static int parse_cmd(const char *cmd, const char **ret, char *str, int len)
 {
 	const char *p = cmd, *r = p;
 
-	parse_comment(p, &p);
+	parse_comment(p, &p, len);
 	p = strchr(p, '"');
 	if (!p)
 		return -1;
@@ -1788,16 +1790,17 @@ static void cb_flash(struct usb_ep *ep, struct usb_request *req)
 
 	/* new partition map */
 	if (!strcmp("partmap", cmd)) {
-		const char *p = (void *)CONFIG_FASTBOOT_BUF_ADDR;
+		const char *p_tmp = (void *)CONFIG_FASTBOOT_BUF_ADDR;
 		part_lists_init(1);
+		char p[512];
+		strncpy(p, p_tmp, download_bytes);
 		if (0 > part_lists_make(p, download_bytes)) {
 			sprintf(response, "FAIL partition map parse");
 			goto err_flash;
 		}
 		part_lists_print();
 		part_mbr_update();
-		parse_comment(p, &p);
-		if (0 == setenv("partmap", (char *)p) && 0 == saveenv()) {
+		if (0 == setenv("partmap", p) && 0 == saveenv()) {
 			fastboot_okay(response, "");
 			goto done_flash;
 		}
